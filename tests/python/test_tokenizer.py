@@ -627,6 +627,65 @@ def test_batch_encode_correctness(enwik8_small):
     print("✅ batch_encode() correctness verified")
 
 
+def test_vocab_size():
+    """Test the vocab_size property."""
+    tokenizer = rustbpe.Tokenizer()
+
+    # New tokenizer should have 256 (byte-level tokens)
+    assert tokenizer.vocab_size == 256, "New tokenizer should have vocab_size=256"
+
+    # After training, vocab_size should match the requested size
+    tokenizer.train_from_iterator(["hello hello hello", "world world world"], vocab_size=260)
+    assert tokenizer.vocab_size == 260, f"Expected vocab_size=260, got {tokenizer.vocab_size}"
+
+    print("✅ vocab_size property works correctly")
+
+
+def test_decode_roundtrip(enwik8_small):
+    """Test that encode->decode produces the original text."""
+    text = enwik8_small[:1000]  # Use first 1KB for quick test
+    vocab_size = 512
+
+    tokenizer = rustbpe.Tokenizer()
+    tokenizer.train_from_iterator([text], vocab_size)
+
+    # Test various strings
+    test_strings = [
+        "hello world",
+        "The quick brown fox jumps over the lazy dog",
+        "12345",
+        "   spaces   ",
+        "MixedCASE123",
+        "",  # empty string
+    ]
+
+    for s in test_strings:
+        ids = tokenizer.encode(s)
+        decoded = tokenizer.decode(ids)
+        assert decoded == s, f"Roundtrip failed for {s!r}: got {decoded!r}"
+
+    # Test roundtrip on the training text itself
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    assert decoded == text, "Roundtrip failed on training text"
+
+    print("✅ decode() roundtrip works correctly")
+
+
+def test_decode_invalid_token():
+    """Test that decode raises an error for invalid token IDs."""
+    tokenizer = rustbpe.Tokenizer()
+
+    # Token 300 doesn't exist in base vocabulary (only 0-255)
+    try:
+        tokenizer.decode([300])
+        assert False, "Should have raised an error for invalid token"
+    except ValueError as e:
+        assert "Unknown token id" in str(e) or "unknown" in str(e).lower()
+
+    print("✅ decode() correctly rejects invalid tokens")
+
+
 @pytest.mark.slow
 def test_batch_encode_performance(enwik8_large):
     """

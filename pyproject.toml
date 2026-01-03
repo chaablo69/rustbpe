@@ -38,3 +38,6 @@ features = ["extension-module"]
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = "test_*.py"
+markers = [
+    "slow: marks tests as slow (use -m 'not slow' to skip)",
+]

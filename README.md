@@ -46,9 +46,12 @@ tokenizer.train_from_iterator(
     vocab_size=4096
 )
 
-# Encode text
+# Encode and decode
 ids = tokenizer.encode("hello world")
-print(ids)  # [hash, of, token, ids]
+text = tokenizer.decode(ids)  # "hello world"
+
+# Check vocabulary size
+print(tokenizer.vocab_size)  # 4096
 
 # Batch encode (parallel)
 all_ids = tokenizer.batch_encode(["text one", "text two", "text three"])
@@ -100,7 +103,9 @@ tokenizer.train_from_iterator(
 | `Tokenizer()` | Create a new tokenizer |
 | `train_from_iterator(texts, vocab_size, buffer_size=8192, pattern=None)` | Train on an iterator of strings |
 | `encode(text)` | Encode a string to token IDs |
+| `decode(ids)` | Decode token IDs back to a string |
 | `batch_encode(texts)` | Encode multiple strings in parallel |
+| `vocab_size` | Property: vocabulary size (256 + number of merges) |
 | `get_pattern()` | Get the regex pattern used for pre-tokenization |
 | `get_mergeable_ranks()` | Get token bytes and ranks for tiktoken export |
 

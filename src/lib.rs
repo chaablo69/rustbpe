@@ -25,6 +25,12 @@ pub struct Tokenizer {
     compiled_pattern: Regex,
 }
 
+impl Default for Tokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ------------------------ internal helpers ------------------------
 
 #[derive(Clone, Debug)]
@@ -193,17 +199,16 @@ impl Tokenizer {
         while merges_done < num_merges {
             let Some(mut top) = heap.pop() else { break; };
 
-            // Lazy refresh
+            // Lazy refresh: if the count changed since we queued this job, update and requeue
             let current = *pair_counts.get(&top.pair).unwrap_or(&0);
-            if top.count != current as u64 {
-                top.count = current as u64;
-                if top.count > 0 {
-                    heap.push(top);
-                }
+            if current <= 0 {
+                // Pair no longer exists or has non-positive count, skip it
                 continue;
             }
-            if top.count == 0 {
-                break;
+            if top.count != current as u64 {
+                top.count = current as u64;
+                heap.push(top);
+                continue;
             }
 
             // Record merge
@@ -394,6 +399,12 @@ impl Tokenizer {
         self.pattern.clone()
     }
 
+    /// Return the vocabulary size (256 base bytes + number of merges)
+    #[getter]
+    pub fn vocab_size(&self) -> u32 {
+        256 + self.merges.len() as u32
+    }
+
     /// Return the mergeable ranks (token bytes -> token id / rank)
     pub fn get_mergeable_ranks(&self) -> Vec<(Vec<u8>, u32)> {
         let mut mergeable_ranks = Vec::new();
@@ -431,14 +442,21 @@ impl Tokenizer {
 
         // Split text using the regex pattern
         for m in self.compiled_pattern.find_iter(text) {
-            let chunk = m.expect("regex match failed").as_str();
+            // Handle potential regex errors gracefully
+            let chunk = match m {
+                Ok(mat) => mat.as_str(),
+                Err(e) => {
+                    log::warn!("Regex match error, skipping chunk: {}", e);
+                    continue;
+                }
+            };
 
             // Convert chunk to bytes then to u32 IDs
             let mut ids: Vec<u32> = chunk.bytes().map(|b| b as u32).collect();
 
-            // Apply merges iteratively
+            // Apply merges iteratively (always merge the earliest-learned pair first)
             while ids.len() >= 2 {
-                // Find the best pair to merge
+                // Find the pair with lowest merge index (earliest merge = lowest new_id)
                 let mut best_pair: Option<(usize, Pair, u32)> = None;
 
                 for i in 0..ids.len() - 1 {
@@ -464,6 +482,51 @@ impl Tokenizer {
         }
 
         all_ids
+    }
+
+    /// Decode token IDs back to a string
+    pub fn decode(&self, ids: Vec<u32>) -> PyResult<String> {
+        // Build reverse mapping: token_id -> bytes
+        let mut vocab: Vec<Vec<u8>> = (0..256u32).map(|i| vec![i as u8]).collect();
+
+        // Sort merges by token id to reconstruct bytes in order
+        let mut sorted_merges: Vec<_> = self.merges.iter().collect();
+        sorted_merges.sort_by_key(|&(_, &token_id)| token_id);
+
+        for (&(left, right), &merged_id) in &sorted_merges {
+            let mut merged_bytes = vocab.get(left as usize)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("Invalid token id {} in merge", left)
+                ))?.clone();
+            merged_bytes.extend(
+                vocab.get(right as usize)
+                    .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                        format!("Invalid token id {} in merge", right)
+                    ))?
+            );
+
+            if vocab.len() <= merged_id as usize {
+                vocab.resize(merged_id as usize + 1, Vec::new());
+            }
+            vocab[merged_id as usize] = merged_bytes;
+        }
+
+        // Convert each token id to bytes and concatenate
+        let mut bytes = Vec::new();
+        for &id in &ids {
+            let token_bytes = vocab.get(id as usize)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("Unknown token id: {}", id)
+                ))?;
+            bytes.extend(token_bytes);
+        }
+
+        // Convert bytes to string (UTF-8)
+        String::from_utf8(bytes).map_err(|e| {
+            pyo3::exceptions::PyUnicodeDecodeError::new_err(format!(
+                "Decoded bytes are not valid UTF-8: {}", e
+            ))
+        })
     }
 
     /// Encode multiple texts in parallel using rayon.
@@ -670,5 +733,319 @@ mod tests {
         assert_eq!(tok.merges.len(), 1);
         assert!(tok.merges.contains_key(&(97, 98)));
         assert_eq!(tok.merges.get(&(97, 98)), Some(&256));
+    }
+
+    // ==================== Additional comprehensive tests ====================
+
+    #[test]
+    fn test_default_trait() {
+        let tok = Tokenizer::default();
+        assert!(tok.merges.is_empty());
+        assert!(tok.pattern.is_empty());
+    }
+
+    #[test]
+    fn test_vocab_size() {
+        let mut tok = Tokenizer::new();
+        assert_eq!(tok.vocab_size(), 256);
+
+        // Add some merges manually
+        tok.merges.insert((97, 98), 256);
+        assert_eq!(tok.vocab_size(), 257);
+
+        tok.merges.insert((256, 99), 257);
+        assert_eq!(tok.vocab_size(), 258);
+    }
+
+    #[test]
+    fn test_word_merge_overlapping_pairs() {
+        // "aaa" = [97, 97, 97] with merge (97, 97) -> 256
+        // Should become [256, 97] (non-overlapping, left-to-right)
+        let mut word = Word::new(vec![97, 97, 97]);
+        let _deltas = word.merge_pair((97, 97), 256);
+        assert_eq!(word.ids, vec![256, 97]);
+    }
+
+    #[test]
+    fn test_word_merge_overlapping_pairs_even() {
+        // "aaaa" = [97, 97, 97, 97] with merge (97, 97) -> 256
+        // Should become [256, 256]
+        let mut word = Word::new(vec![97, 97, 97, 97]);
+        let _deltas = word.merge_pair((97, 97), 256);
+        assert_eq!(word.ids, vec![256, 256]);
+    }
+
+    #[test]
+    fn test_word_merge_multiple_occurrences() {
+        // "abXab" where X doesn't match
+        let mut word = Word::new(vec![1, 2, 99, 1, 2]);
+        let deltas = word.merge_pair((1, 2), 256);
+        assert_eq!(word.ids, vec![256, 99, 256]);
+
+        // Count (1, 2) removals in deltas
+        let ab_removals: i32 = deltas.iter()
+            .filter(|(p, _)| *p == (1, 2))
+            .map(|(_, d)| d)
+            .sum();
+        assert_eq!(ab_removals, -2); // two occurrences removed
+    }
+
+    #[test]
+    fn test_encode_chained_merges() {
+        // Set up a tokenizer with chained merges:
+        // (97, 97) -> 256  ('aa' -> 256)
+        // (256, 97) -> 257 ('aaa' effectively -> 257)
+        let mut merges = StdHashMap::new();
+        merges.insert((97, 97), 256);   // 'aa' -> 256 (learned first)
+        merges.insert((256, 97), 257);  // 'aa' + 'a' -> 257 (learned second)
+
+        let tok = Tokenizer {
+            merges,
+            pattern: r"\w+".to_string(),
+            compiled_pattern: Regex::new(r"\w+").unwrap(),
+        };
+
+        // "aaa" should encode as [257]
+        // Step 1: [97, 97, 97]
+        // Step 2: merge (97, 97) at pos 0 -> [256, 97]
+        // Step 3: merge (256, 97) -> [257]
+        let ids = tok.encode("aaa");
+        assert_eq!(ids, vec![257]);
+
+        // "aaaa" should encode as [256, 256]
+        // Because (97, 97) has lower id than (256, 97), so we merge all 'aa' pairs first
+        let ids = tok.encode("aaaa");
+        assert_eq!(ids, vec![256, 256]);
+
+        // "aaaaa" should be [257, 256]
+        // [97, 97, 97, 97, 97]
+        // -> [256, 97, 97, 97] (merge first aa)
+        // -> [256, 256, 97] (merge second aa)
+        // -> [257, 256] (merge (256, 97))
+        // Wait, let me recalculate...
+        // Actually the algorithm picks the pair with LOWEST new_id.
+        // (97, 97) -> 256, (256, 97) -> 257
+        // So 256 < 257, meaning (97, 97) is always preferred.
+        // [97, 97, 97, 97, 97]
+        // Pairs: (97,97) at 0,1,2,3. All map to 256.
+        // Pick leftmost (position 0): [256, 97, 97, 97]
+        // Pairs: (256,97)->257, (97,97)->256 at pos 1,2
+        // 256 < 257, pick (97,97) at pos 1: [256, 256, 97]
+        // Pairs: (256,256) not in merges, (256,97)->257
+        // Only option is 257: [256, 257]
+        let ids = tok.encode("aaaaa");
+        assert_eq!(ids, vec![256, 257]);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_simple() {
+        // Set up tokenizer with some merges
+        let mut merges = StdHashMap::new();
+        merges.insert((104, 105), 256); // 'hi' -> 256
+
+        let tok = Tokenizer {
+            merges,
+            pattern: r"\w+|\s+".to_string(),
+            compiled_pattern: Regex::new(r"\w+|\s+").unwrap(),
+        };
+
+        let text = "hi";
+        let ids = tok.encode(text);
+        let decoded = tok.decode(ids).unwrap();
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_with_spaces() {
+        let mut merges = StdHashMap::new();
+        merges.insert((104, 101), 256); // 'he' -> 256
+        merges.insert((108, 108), 257); // 'll' -> 257
+        merges.insert((256, 257), 258); // 'hell' -> 258
+
+        let tok = Tokenizer {
+            merges,
+            pattern: r"\w+|\s+".to_string(),
+            compiled_pattern: Regex::new(r"\w+|\s+").unwrap(),
+        };
+
+        let text = "hello world";
+        let ids = tok.encode(text);
+        let decoded = tok.decode(ids).unwrap();
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn test_decode_byte_level() {
+        // Decode raw byte tokens (no merges)
+        let tok = Tokenizer {
+            merges: StdHashMap::new(),
+            pattern: String::new(),
+            compiled_pattern: Regex::new("").unwrap(),
+        };
+
+        // [104, 105] = "hi"
+        let decoded = tok.decode(vec![104, 105]).unwrap();
+        assert_eq!(decoded, "hi");
+    }
+
+    #[test]
+    fn test_decode_invalid_token() {
+        let tok = Tokenizer::new();
+
+        // Token 300 doesn't exist (only 0-255 in base vocab)
+        let result = tok.decode(vec![300]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_train_multiple_merges() {
+        let mut tok = Tokenizer {
+            merges: StdHashMap::new(),
+            pattern: String::new(),
+            compiled_pattern: Regex::new("").unwrap(),
+        };
+
+        // "ab" appears 100 times, "bc" appears 50 times
+        // After merging "ab", the corpus becomes "X c" where X=256
+        // Then "Xc" (256, 99) should be merged next? No wait...
+        // Let's use a simpler example:
+        // "ab" appears 10 times
+        let words = vec![
+            Word::new(vec![97, 98]), // "ab"
+        ];
+        let counts = vec![10];
+
+        // Train with vocab_size = 258 (2 merges)
+        // But we only have one unique pair, so only one merge will happen
+        tok.train_core_incremental(words, counts, 258);
+
+        assert_eq!(tok.merges.len(), 1);
+    }
+
+    #[test]
+    fn test_train_creates_chained_merges() {
+        let mut tok = Tokenizer {
+            merges: StdHashMap::new(),
+            pattern: String::new(),
+            compiled_pattern: Regex::new("").unwrap(),
+        };
+
+        // "aaa" = [97, 97, 97]
+        // First merge: (97, 97) -> 256, word becomes [256, 97]
+        // Second merge: (256, 97) -> 257, word becomes [257]
+        let words = vec![
+            Word::new(vec![97, 97, 97]),
+        ];
+        let counts = vec![10];
+
+        tok.train_core_incremental(words, counts, 258);
+
+        assert_eq!(tok.merges.len(), 2);
+        assert_eq!(tok.merges.get(&(97, 97)), Some(&256));
+        assert_eq!(tok.merges.get(&(256, 97)), Some(&257));
+    }
+
+    #[test]
+    fn test_get_mergeable_ranks_chained() {
+        // Test that chained merges produce correct byte sequences
+        let mut merges = StdHashMap::new();
+        merges.insert((65, 66), 256);  // 'AB' -> 256
+        merges.insert((256, 67), 257); // 'ABC' -> 257
+
+        let tok = Tokenizer {
+            merges,
+            pattern: String::new(),
+            compiled_pattern: Regex::new("").unwrap(),
+        };
+
+        let ranks = tok.get_mergeable_ranks();
+        assert_eq!(ranks.len(), 258);
+
+        // Token 256 should be [65, 66] = "AB"
+        assert_eq!(ranks[256], (vec![65u8, 66u8], 256));
+
+        // Token 257 should be [65, 66, 67] = "ABC"
+        assert_eq!(ranks[257], (vec![65u8, 66u8, 67u8], 257));
+    }
+
+    #[test]
+    fn test_encode_empty_string() {
+        let tok = Tokenizer {
+            merges: StdHashMap::new(),
+            pattern: r"\w+".to_string(),
+            compiled_pattern: Regex::new(r"\w+").unwrap(),
+        };
+
+        let ids = tok.encode("");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_encode_no_matches() {
+        // Pattern only matches words, input has no words
+        let tok = Tokenizer {
+            merges: StdHashMap::new(),
+            pattern: r"\w+".to_string(),
+            compiled_pattern: Regex::new(r"\w+").unwrap(),
+        };
+
+        let ids = tok.encode("   ");  // only spaces
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_decode_empty() {
+        let tok = Tokenizer::new();
+        let decoded = tok.decode(vec![]).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_word_merge_deltas_correctness() {
+        // Verify that deltas are exactly correct for pair count updates
+        // Word: [1, 2, 3, 1, 2] with merge (1, 2) -> 99
+        // Before: pairs are (1,2), (2,3), (3,1), (1,2)
+        // After:  [99, 3, 99], pairs are (99,3), (3,99)
+        let mut word = Word::new(vec![1, 2, 3, 1, 2]);
+        let deltas = word.merge_pair((1, 2), 99);
+
+        // Aggregate deltas by pair
+        let mut delta_map: StdHashMap<Pair, i32> = StdHashMap::new();
+        for (pair, delta) in deltas {
+            *delta_map.entry(pair).or_default() += delta;
+        }
+
+        // (1, 2) should have -2 (removed twice)
+        assert_eq!(delta_map.get(&(1, 2)), Some(&-2));
+        // (2, 3) should have -1 (removed once)
+        assert_eq!(delta_map.get(&(2, 3)), Some(&-1));
+        // (3, 1) should have -1 (removed once)
+        assert_eq!(delta_map.get(&(3, 1)), Some(&-1));
+        // (99, 3) should have +1 (created once)
+        assert_eq!(delta_map.get(&(99, 3)), Some(&1));
+        // (3, 99) should have +1 (created once)
+        assert_eq!(delta_map.get(&(3, 99)), Some(&1));
+    }
+
+    #[test]
+    fn test_count_pairs_parallel_empty() {
+        let words: Vec<Word> = vec![];
+        let counts: Vec<i32> = vec![];
+
+        let (pair_counts, positions) = count_pairs_parallel(&words, &counts);
+        assert!(pair_counts.is_empty());
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn test_count_pairs_parallel_zero_count() {
+        // Words with zero count should not contribute
+        let words = vec![
+            Word::new(vec![1, 2, 3]),
+        ];
+        let counts = vec![0];
+
+        let (pair_counts, _positions) = count_pairs_parallel(&words, &counts);
+        assert!(pair_counts.is_empty());
     }
 }
