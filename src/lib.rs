@@ -45,7 +45,7 @@ impl Word {
     }
 
     #[inline]
-    fn pairs<'a>(&'a self) -> impl Iterator<Item = Pair> + 'a {
+    fn pairs(&self) -> impl Iterator<Item = Pair> + '_ {
         self.ids.windows(2).map(|w| (w[0], w[1]))
     }
 
@@ -68,7 +68,11 @@ impl Word {
         while i < n {
             if i + 1 < n && self.ids[i] == a && self.ids[i + 1] == b {
                 let left = out.last().copied();
-                let right = if i + 2 < n { Some(self.ids[i + 2]) } else { None };
+                let right = if i + 2 < n {
+                    Some(self.ids[i + 2])
+                } else {
+                    None
+                };
 
                 // remove old pairs
                 if let Some(x) = left {
@@ -163,7 +167,6 @@ fn count_pairs_parallel(
 // ------------------------ END helpers ------------------------
 
 impl Tokenizer {
-
     /// Core incremental BPE training given unique words and their counts.
     /// `words`: one entry per unique chunk (Vec<u32> of token-ids/bytes).
     /// `counts`: same length as `words`, count per chunk.
@@ -174,7 +177,10 @@ impl Tokenizer {
         self.merges.clear();
 
         // ---- Initial pair_counts and where_to_update (parallel) ----
-        log::info!("Computing initial pair counts from {} unique sequences", words.len());
+        log::info!(
+            "Computing initial pair counts from {} unique sequences",
+            words.len()
+        );
         let (mut pair_counts, mut where_to_update) = count_pairs_parallel(&words, &counts);
 
         // ---- Build heap ----
@@ -197,7 +203,9 @@ impl Tokenizer {
         let mut last_log_percent = 0u32;
 
         while merges_done < num_merges {
-            let Some(mut top) = heap.pop() else { break; };
+            let Some(mut top) = heap.pop() else {
+                break;
+            };
 
             // Lazy refresh: if the count changed since we queued this job, update and requeue
             let current = *pair_counts.get(&top.pair).unwrap_or(&0);
@@ -251,7 +259,12 @@ impl Tokenizer {
             if current_percent > last_log_percent {
                 log::info!(
                     "Progress: {}% ({}/{} merges) - Last merge: {:?} -> {} (frequency: {})",
-                    current_percent, merges_done, num_merges, top.pair, new_id, top.count
+                    current_percent,
+                    merges_done,
+                    num_merges,
+                    top.pair,
+                    new_id,
+                    top.count
                 );
                 last_log_percent = current_percent;
             }
@@ -292,8 +305,9 @@ impl Tokenizer {
 
         // Update the stored pattern and compile it
         self.pattern = pattern_str.clone();
-        self.compiled_pattern = Regex::new(&pattern_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid regex pattern: {}", e)))?;
+        self.compiled_pattern = Regex::new(&pattern_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid regex pattern: {}", e))
+        })?;
 
         // Prepare a true Python iterator object
         let py_iter: pyo3::Py<pyo3::PyAny> = unsafe {
@@ -306,7 +320,10 @@ impl Tokenizer {
         // Temporary buffer we refill under the GIL
         let mut buf: Vec<String> = Vec::with_capacity(buffer_size);
 
-        log::info!("Processing sequences from iterator (buffer_size: {})", buffer_size);
+        log::info!(
+            "Processing sequences from iterator (buffer_size: {})",
+            buffer_size
+        );
         let mut total_sequences = 0u64;
 
         // Helper: refill `buf` with up to `buffer_size` strings from the Python iterator.
@@ -360,15 +377,12 @@ impl Tokenizer {
                         }
                         m
                     })
-                    .reduce(
-                        || AHashMap::new(),
-                        |mut a, b| {
-                            for (k, v) in b {
-                                *a.entry(k).or_default() += v;
-                            }
-                            a
-                        },
-                    )
+                    .reduce(AHashMap::new, |mut a, b| {
+                        for (k, v) in b {
+                            *a.entry(k).or_default() += v;
+                        }
+                        a
+                    })
             });
 
             // Merge local into global (single-threaded)
@@ -380,13 +394,19 @@ impl Tokenizer {
                 break;
             }
         }
-        log::info!("Processed {} sequences total, {} unique", total_sequences, counts.len());
+        log::info!(
+            "Processed {} sequences total, {} unique",
+            total_sequences,
+            counts.len()
+        );
 
         // Materialize words & counts
         let mut words = Vec::with_capacity(counts.len());
         let mut cvec = Vec::with_capacity(counts.len());
         for (chunk, c) in counts.into_iter() {
-            words.push(Word::new(chunk.as_bytes().iter().map(|&b| b as u32).collect()));
+            words.push(Word::new(
+                chunk.as_bytes().iter().map(|&b| b as u32).collect(),
+            ));
             cvec.push(c);
         }
 
@@ -494,16 +514,21 @@ impl Tokenizer {
         sorted_merges.sort_by_key(|&(_, &token_id)| token_id);
 
         for (&(left, right), &merged_id) in &sorted_merges {
-            let mut merged_bytes = vocab.get(left as usize)
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("Invalid token id {} in merge", left)
-                ))?.clone();
-            merged_bytes.extend(
-                vocab.get(right as usize)
-                    .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                        format!("Invalid token id {} in merge", right)
-                    ))?
-            );
+            let mut merged_bytes = vocab
+                .get(left as usize)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid token id {} in merge",
+                        left
+                    ))
+                })?
+                .clone();
+            merged_bytes.extend(vocab.get(right as usize).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid token id {} in merge",
+                    right
+                ))
+            })?);
 
             if vocab.len() <= merged_id as usize {
                 vocab.resize(merged_id as usize + 1, Vec::new());
@@ -514,17 +539,17 @@ impl Tokenizer {
         // Convert each token id to bytes and concatenate
         let mut bytes = Vec::new();
         for &id in &ids {
-            let token_bytes = vocab.get(id as usize)
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("Unknown token id: {}", id)
-                ))?;
+            let token_bytes = vocab.get(id as usize).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!("Unknown token id: {}", id))
+            })?;
             bytes.extend(token_bytes);
         }
 
         // Convert bytes to string (UTF-8)
         String::from_utf8(bytes).map_err(|e| {
             pyo3::exceptions::PyUnicodeDecodeError::new_err(format!(
-                "Decoded bytes are not valid UTF-8: {}", e
+                "Decoded bytes are not valid UTF-8: {}",
+                e
             ))
         })
     }
@@ -603,7 +628,7 @@ mod tests {
         let mut word = Word::new(vec![1, 2, 3]);
         let deltas = word.merge_pair((4, 5), 99);
         assert_eq!(word.ids, vec![1, 2, 3]); // unchanged
-        // Only delta should be for pairs that don't exist, so effectively empty useful deltas
+                                             // Only delta should be for pairs that don't exist, so effectively empty useful deltas
         assert!(deltas.is_empty() || deltas.iter().all(|(_, d)| *d == 0));
     }
 
@@ -690,10 +715,7 @@ mod tests {
 
     #[test]
     fn test_count_pairs_parallel() {
-        let words = vec![
-            Word::new(vec![1, 2, 3]),
-            Word::new(vec![1, 2, 4]),
-        ];
+        let words = vec![Word::new(vec![1, 2, 3]), Word::new(vec![1, 2, 4])];
         let counts = vec![1, 2]; // first word appears 1x, second 2x
 
         let (pair_counts, positions) = count_pairs_parallel(&words, &counts);
@@ -721,7 +743,7 @@ mod tests {
 
         // "ab" repeated 10 times, "cd" repeated 5 times
         let words = vec![
-            Word::new(vec![97, 98]), // "ab"
+            Word::new(vec![97, 98]),  // "ab"
             Word::new(vec![99, 100]), // "cd"
         ];
         let counts = vec![10, 5];
@@ -783,7 +805,8 @@ mod tests {
         assert_eq!(word.ids, vec![256, 99, 256]);
 
         // Count (1, 2) removals in deltas
-        let ab_removals: i32 = deltas.iter()
+        let ab_removals: i32 = deltas
+            .iter()
             .filter(|(p, _)| *p == (1, 2))
             .map(|(_, d)| d)
             .sum();
@@ -796,8 +819,8 @@ mod tests {
         // (97, 97) -> 256  ('aa' -> 256)
         // (256, 97) -> 257 ('aaa' effectively -> 257)
         let mut merges = StdHashMap::new();
-        merges.insert((97, 97), 256);   // 'aa' -> 256 (learned first)
-        merges.insert((256, 97), 257);  // 'aa' + 'a' -> 257 (learned second)
+        merges.insert((97, 97), 256); // 'aa' -> 256 (learned first)
+        merges.insert((256, 97), 257); // 'aa' + 'a' -> 257 (learned second)
 
         let tok = Tokenizer {
             merges,
@@ -933,9 +956,7 @@ mod tests {
         // "aaa" = [97, 97, 97]
         // First merge: (97, 97) -> 256, word becomes [256, 97]
         // Second merge: (256, 97) -> 257, word becomes [257]
-        let words = vec![
-            Word::new(vec![97, 97, 97]),
-        ];
+        let words = vec![Word::new(vec![97, 97, 97])];
         let counts = vec![10];
 
         tok.train_core_incremental(words, counts, 258);
@@ -949,7 +970,7 @@ mod tests {
     fn test_get_mergeable_ranks_chained() {
         // Test that chained merges produce correct byte sequences
         let mut merges = StdHashMap::new();
-        merges.insert((65, 66), 256);  // 'AB' -> 256
+        merges.insert((65, 66), 256); // 'AB' -> 256
         merges.insert((256, 67), 257); // 'ABC' -> 257
 
         let tok = Tokenizer {
@@ -989,7 +1010,7 @@ mod tests {
             compiled_pattern: Regex::new(r"\w+").unwrap(),
         };
 
-        let ids = tok.encode("   ");  // only spaces
+        let ids = tok.encode("   "); // only spaces
         assert!(ids.is_empty());
     }
 
@@ -1040,9 +1061,7 @@ mod tests {
     #[test]
     fn test_count_pairs_parallel_zero_count() {
         // Words with zero count should not contribute
-        let words = vec![
-            Word::new(vec![1, 2, 3]),
-        ];
+        let words = vec![Word::new(vec![1, 2, 3])];
         let counts = vec![0];
 
         let (pair_counts, _positions) = count_pairs_parallel(&words, &counts);
