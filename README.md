@@ -163,6 +163,10 @@ Byte Pair Encoding builds a vocabulary iteratively:
 
 The result is a vocabulary that efficiently represents common patterns while being able to encode any input.
 
+## LLM Assistance note
+
+I wrote the Python reference code personally and from scratch and I am expert there and understand it fully. I then wrote the Rust code against this implementation with tests for equality. However, I am not a Rust developer by background so I had significant help from ChatGPT and Claude Code Opus 4.5. All the equality tests pass as far as I am aware, but I do apologize if some of the Rust code is not properly arranged, structured, or implemented. Please let me know in Issues/PRs if so and I am happy to adjust the code to make it better.
+
 ## License
 
 MIT
